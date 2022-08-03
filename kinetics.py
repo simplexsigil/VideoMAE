@@ -9,8 +9,11 @@ from random_erasing import RandomErasing
 import warnings
 from decord import VideoReader, cpu
 from torch.utils.data import Dataset
-import video_transforms as video_transforms 
+import video_transforms as video_transforms
 import volume_transforms as volume_transforms
+
+from decord import DECORDError
+
 
 class VideoClsDataset(Dataset):
     """Load your own video classification dataset."""
@@ -18,7 +21,7 @@ class VideoClsDataset(Dataset):
     def __init__(self, anno_path, data_path, mode='train', clip_len=8,
                  frame_sample_rate=2, crop_size=224, short_side_size=256,
                  new_height=256, new_width=340, keep_aspect_ratio=True,
-                 num_segment=1, num_crop=1, test_num_segment=10, test_num_crop=3,args=None):
+                 num_segment=1, num_crop=1, test_num_segment=10, test_num_crop=3, args=None):
         self.anno_path = anno_path
         self.data_path = data_path
         self.mode = mode
@@ -81,17 +84,31 @@ class VideoClsDataset(Dataset):
 
     def __getitem__(self, index):
         if self.mode == 'train':
-            args = self.args 
+            args = self.args
             scale_t = 1
 
             sample = self.dataset_samples[index]
-            buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t) # T H W C
+
+            buffer = []
+
+            try:
+                buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t)  # T H W C
+            except BaseException as be:
+                print(be)
+            except DECORDError as be:
+                print(be)
+
             if len(buffer) == 0:
                 while len(buffer) == 0:
-                    warnings.warn("video {} not correctly loaded during training".format(sample))
-                    index = np.random.randint(self.__len__())
-                    sample = self.dataset_samples[index]
-                    buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t)
+                    try:
+                        warnings.warn("video {} not correctly loaded during training".format(sample))
+                        index = np.random.randint(self.__len__())
+                        sample = self.dataset_samples[index]
+                        buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t)
+                    except BaseException as be:
+                        print(be)
+                    except DECORDError as be:
+                        print(be)
 
             if args.num_sample > 1:
                 frame_list = []
@@ -106,18 +123,33 @@ class VideoClsDataset(Dataset):
                 return frame_list, label_list, index_list, {}
             else:
                 buffer = self._aug_frame(buffer, args)
-            
+
             return buffer, self.label_array[index], index, {}
 
         elif self.mode == 'validation':
             sample = self.dataset_samples[index]
-            buffer = self.loadvideo_decord(sample)
+
+            buffer = []
+
+            try:
+                buffer = self.loadvideo_decord(sample)  # T H W C
+            except BaseException as be:
+                print(be)
+            except DECORDError as be:
+                print(be)
+
             if len(buffer) == 0:
                 while len(buffer) == 0:
-                    warnings.warn("video {} not correctly loaded during validation".format(sample))
-                    index = np.random.randint(self.__len__())
-                    sample = self.dataset_samples[index]
-                    buffer = self.loadvideo_decord(sample)
+                    try:
+                        warnings.warn("video {} not correctly loaded during validation".format(sample))
+                        index = np.random.randint(self.__len__())
+                        sample = self.dataset_samples[index]
+                        buffer = self.loadvideo_decord(sample)
+                    except BaseException as be:
+                        print(be)
+                    except DECORDError as be:
+                        print(be)
+
             buffer = self.data_transform(buffer)
             return buffer, self.label_array[index], sample.split("/")[-1].split(".")[0]
 
@@ -127,7 +159,7 @@ class VideoClsDataset(Dataset):
             buffer = self.loadvideo_decord(sample)
 
             while len(buffer) == 0:
-                warnings.warn("video {}, temporal {}, spatial {} not found during testing".format(\
+                warnings.warn("video {}, temporal {}, spatial {} not found during testing".format(
                     str(self.test_dataset[index]), chunk_nb, split_nb))
                 index = np.random.randint(self.__len__())
                 sample = self.test_dataset[index]
@@ -139,17 +171,17 @@ class VideoClsDataset(Dataset):
                 buffer = np.stack(buffer, 0)
 
             spatial_step = 1.0 * (max(buffer.shape[1], buffer.shape[2]) - self.short_side_size) \
-                                 / (self.test_num_crop - 1)
+                           / (self.test_num_crop - 1)
             temporal_step = max(1.0 * (buffer.shape[0] - self.clip_len) \
                                 / (self.test_num_segment - 1), 0)
             temporal_start = int(chunk_nb * temporal_step)
             spatial_start = int(split_nb * spatial_step)
             if buffer.shape[1] >= buffer.shape[2]:
                 buffer = buffer[temporal_start:temporal_start + self.clip_len, \
-                       spatial_start:spatial_start + self.short_side_size, :, :]
+                         spatial_start:spatial_start + self.short_side_size, :, :]
             else:
                 buffer = buffer[temporal_start:temporal_start + self.clip_len, \
-                       :, spatial_start:spatial_start + self.short_side_size, :]
+                         :, spatial_start:spatial_start + self.short_side_size, :]
 
             buffer = self.data_transform(buffer)
             return buffer, self.test_label_array[index], sample.split("/")[-1].split(".")[0], \
@@ -158,9 +190,9 @@ class VideoClsDataset(Dataset):
             raise NameError('mode {} unkown'.format(self.mode))
 
     def _aug_frame(
-        self,
-        buffer,
-        args,
+            self,
+            buffer,
+            args,
     ):
 
         aug_transform = video_transforms.create_random_augment(
@@ -176,9 +208,9 @@ class VideoClsDataset(Dataset):
         buffer = aug_transform(buffer)
 
         buffer = [transforms.ToTensor()(img) for img in buffer]
-        buffer = torch.stack(buffer) # T C H W
-        buffer = buffer.permute(0, 2, 3, 1) # T H W C 
-        
+        buffer = torch.stack(buffer)  # T C H W
+        buffer = buffer.permute(0, 2, 3, 1)  # T H W C
+
         # T H W C 
         buffer = tensor_normalize(
             buffer, [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
@@ -197,7 +229,7 @@ class VideoClsDataset(Dataset):
             min_scale=256,
             max_scale=320,
             crop_size=self.crop_size,
-            random_horizontal_flip=False if args.data_set == 'SSV2' else True ,
+            random_horizontal_flip=False if args.data_set == 'SSV2' else True,
             inverse_uniform_sampling=False,
             aspect_ratio=asp,
             scale=scl,
@@ -217,7 +249,6 @@ class VideoClsDataset(Dataset):
             buffer = buffer.permute(1, 0, 2, 3)
 
         return buffer
-
 
     def loadvideo_decord(self, sample, sample_rate_scale=1):
         """Load video content using Decord"""
@@ -263,7 +294,7 @@ class VideoClsDataset(Dataset):
                 str_idx = end_idx - converted_len
                 index = np.linspace(str_idx, end_idx, num=self.clip_len)
                 index = np.clip(index, str_idx, end_idx - 1).astype(np.int64)
-            index = index + i*seg_len
+            index = index + i * seg_len
             all_index.extend(list(index))
 
         all_index = all_index[::int(sample_rate_scale)]
@@ -279,16 +310,16 @@ class VideoClsDataset(Dataset):
 
 
 def spatial_sampling(
-    frames,
-    spatial_idx=-1,
-    min_scale=256,
-    max_scale=320,
-    crop_size=224,
-    random_horizontal_flip=True,
-    inverse_uniform_sampling=False,
-    aspect_ratio=None,
-    scale=None,
-    motion_shift=False,
+        frames,
+        spatial_idx=-1,
+        min_scale=256,
+        max_scale=320,
+        crop_size=224,
+        random_horizontal_flip=True,
+        inverse_uniform_sampling=False,
+        aspect_ratio=None,
+        scale=None,
+        motion_shift=False,
 ):
     """
     Perform spatial sampling on the given video frames. If spatial_idx is
@@ -422,6 +453,7 @@ class VideoMAE(torch.utils.data.Dataset):
     lazy_init : bool, default False.
         If set to True, build a dataset instance without loading any dataset.
     """
+
     def __init__(self,
                  root,
                  setting,
@@ -461,12 +493,11 @@ class VideoMAE(torch.utils.data.Dataset):
         self.transform = transform
         self.lazy_init = lazy_init
 
-
         if not self.lazy_init:
             self.clips = self._make_dataset(root, setting)
             if len(self.clips) == 0:
-                raise(RuntimeError("Found 0 video clips in subfolders of: " + root + "\n"
-                                   "Check your data directory (opt.data-dir)."))
+                raise (RuntimeError("Found 0 video clips in subfolders of: " + root + "\n"
+                                                                                      "Check your data directory (opt.data-dir)."))
 
     def __getitem__(self, index):
 
@@ -487,9 +518,10 @@ class VideoMAE(torch.utils.data.Dataset):
 
         images = self._video_TSN_decord_batch_loader(directory, decord_vr, duration, segment_indices, skip_offsets)
 
-        process_data, mask = self.transform((images, None)) # T*C,H,W
-        process_data = process_data.view((self.new_length, 3) + process_data.size()[-2:]).transpose(0,1)  # T*C,H,W -> T,C,H,W -> C,T,H,W
-        
+        process_data, mask = self.transform((images, None))  # T*C,H,W
+        process_data = process_data.view((self.new_length, 3) + process_data.size()[-2:]).transpose(0,
+                                                                                                    1)  # T*C,H,W -> T,C,H,W -> C,T,H,W
+
         return (process_data, mask)
 
     def __len__(self):
@@ -497,7 +529,7 @@ class VideoMAE(torch.utils.data.Dataset):
 
     def _make_dataset(self, directory, setting):
         if not os.path.exists(setting):
-            raise(RuntimeError("Setting file %s doesn't exist. Check opt.train-list and opt.val-list. " % (setting)))
+            raise (RuntimeError("Setting file %s doesn't exist. Check opt.train-list and opt.val-list. " % (setting)))
         clips = []
         with open(setting) as split_f:
             data = split_f.readlines()
@@ -505,7 +537,7 @@ class VideoMAE(torch.utils.data.Dataset):
                 line_info = line.split(' ')
                 # line format: video_path, video_duration, video_label
                 if len(line_info) < 2:
-                    raise(RuntimeError('Video input format is not correct, missing one or more element. %s' % line))
+                    raise (RuntimeError('Video input format is not correct, missing one or more element. %s' % line))
                 clip_path = os.path.join(line_info[0])
                 target = int(line_info[1])
                 item = (clip_path, target)
@@ -534,7 +566,6 @@ class VideoMAE(torch.utils.data.Dataset):
                 self.skip_length // self.new_step, dtype=int)
         return offsets + 1, skip_offsets
 
-
     def _video_TSN_decord_batch_loader(self, directory, video_reader, duration, indices, skip_offsets):
         sampled_list = []
         frame_id_list = []
@@ -550,7 +581,10 @@ class VideoMAE(torch.utils.data.Dataset):
                     offset += self.new_step
         try:
             video_data = video_reader.get_batch(frame_id_list).asnumpy()
-            sampled_list = [Image.fromarray(video_data[vid, :, :, :]).convert('RGB') for vid, _ in enumerate(frame_id_list)]
+            sampled_list = [Image.fromarray(video_data[vid, :, :, :]).convert('RGB') for vid, _ in
+                            enumerate(frame_id_list)]
         except:
-            raise RuntimeError('Error occured in reading frames {} from video {} of duration {}.'.format(frame_id_list, directory, duration))
+            raise RuntimeError(
+                'Error occured in reading frames {} from video {} of duration {}.'.format(frame_id_list, directory,
+                                                                                          duration))
         return sampled_list
